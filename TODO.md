@@ -4,8 +4,8 @@
 
 | Milestone                  | Rough Deadline    |
 | -------------------------- | ----------------- |
-| PCB ordered                | 15 Dec 2026       |
 | Firmware done              | 15 Jan 2027       |
+| PCB ordered                | 31 Jan 2026       |
 | Single-robot functionality | 15 Feb 2027       |
 | Multi-robot solutions      | 31 Mar 2027       |
 | Buffer + final docs        | 1 Apr – 15 Apr    |
@@ -13,22 +13,27 @@
 ---
 
 ## Firmware
+### Architecture
+- [ ] Define which MCU runs what
+- [ ] Define packet formats between MCUs
+- [ ] Define packet formats between radios
 
 ### Peripherals
 
 - [ ] Blinky on nRF with Rust
+- [ ] nRF UART to Pololu
 - [ ] SD card with nRF
 - [ ] ToF sensor with nRF
-- [ ] nRF UART to Pololu
 - [ ] Line sensors
-- [ ] ? *Writing from Pololu and nRF to one SD card*
-  - Result decides if one or two SD card slots on the PCB are needed
 
 ### Communication
+- [ ] (Try embassy-nrf 802.15.4)
+- [ ] Implement CSMA(/CA?)
+  - [ ] broadcast send/receive
+  - [ ] unicast send/receive
+- [ ] Joystick control (replace Crazyradio with nRF (rust))
+- [ ] Sniffer
 
-- [ ] Communication (TDMA?)
-- [ ] Port workstation to nrf comm to Rust
-    - ESB vs reserve one TDMA slot for the Crazyradio?
 
 ---
 
@@ -44,20 +49,20 @@
 
 ## Single-robot functionality
 
-- [ ] Cloud map
-- [ ] Localization via cloud map
-- [ ] Planning algorithms (which ones?)
-
----
-
-## Multi-robot assignment solutions
-
-- [ ] Consensus
-- [ ] Map building 
-- [ ] Collision avoidance
-- [ ] Exploration
+- [ ] Localization via odometry + line sensor correction
+- [ ] Occupancy grid from ToF sensor
+- [ ] Controller
+- [ ] Planner (A*)
 
 ---
 ## Documentation
 
 - [ ] 
+
+---
+## (Multi-robot assignment solutions) ! -> private repo!
+
+- [ ] Consensus
+- [ ] Map building 
+- [ ] Collision avoidance
+- [ ] Exploration
