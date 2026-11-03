@@ -4,8 +4,8 @@
 
 | Milestone                  | Rough Deadline    |
 | -------------------------- | ----------------- |
-| Firmware done              | 15 Jan 2027       |
-| PCB ordered                | 31 Jan 2026       |
+| Firmware done              | 31 Dec 2026      |
+| PCB ordered                | 15 Jan 2027       |
 | Single-robot functionality | 15 Feb 2027       |
 | Multi-robot solutions      | 31 Mar 2027       |
 | Buffer + final docs        | 1 Apr – 15 Apr    |
@@ -14,7 +14,7 @@
 
 ## Firmware
 ### Architecture
-- [ ] Define which MCU runs what
+- [x] Define which MCU runs what
 - [ ] Define packet formats between MCUs
 - [ ] Define packet formats between radios
 
