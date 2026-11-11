@@ -4,7 +4,7 @@
 
 | Milestone                  | Rough Deadline    |
 | -------------------------- | ----------------- |
-| Firmware done              | 31 Dec 2026      |
+| Firmware done              | 31 Dec 2026       |
 | PCB ordered                | 15 Jan 2027       |
 | Single-robot functionality | 15 Feb 2027       |
 | Multi-robot solutions      | 31 Mar 2027       |
@@ -24,11 +24,10 @@
 - [ ] nRF UART to Pololu
 - [ ] SD card with nRF
 - [ ] ToF sensor with nRF
-- [ ] Line sensors
+- [x] Line sensors
 
 ### Communication
-- [ ] (Try embassy-nrf 802.15.4)
-- [ ] Implement CSMA(/CA?)
+- [ ] Integrate embassy-nrf 802.15.4
   - [ ] broadcast send/receive
   - [ ] unicast send/receive
 - [ ] Joystick control (replace Crazyradio with nRF (rust))
