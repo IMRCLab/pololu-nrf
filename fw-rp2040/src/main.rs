@@ -4,7 +4,7 @@
 use embassy_rp::gpio::{Level, Output};
 use embassy_time::Timer;
 
-use {defmt_rtt as _, panic_probe as _};
+use panic_halt as _;
 
 #[embassy_executor::task] 
 async fn led_blink_task(mut led: Output<'static>) {
