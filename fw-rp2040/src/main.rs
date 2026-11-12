@@ -1,12 +1,12 @@
 #![no_std]
-#![no_main] 
+#![no_main]
 
 use embassy_rp::gpio::{Level, Output};
 use embassy_time::Timer;
 
 use panic_halt as _;
 
-#[embassy_executor::task] 
+#[embassy_executor::task]
 async fn led_blink_task(mut led: Output<'static>) {
     loop {
         led.toggle();
