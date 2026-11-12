@@ -1,0 +1,46 @@
+name: fw-rp2040
+
+on:
+  push:
+    paths:
+      - "fw-rp2040/**"
+      - ".github/workflows/fw-rp2040.yml"
+  pull_request:
+    paths:
+      - "fw-rp2040/**"
+      - ".github/workflows/fw-rp2040.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fw-rp2040
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fw-rp2040
+
+      - name: Install flip-link
+        uses: taiki-e/install-action@v2
+        with:
+          tool: flip-link
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release
