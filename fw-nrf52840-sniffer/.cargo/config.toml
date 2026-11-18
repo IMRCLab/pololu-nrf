@@ -1,0 +1,11 @@
+[build]
+# Build for the nRF52840's Cortex-M4F by default, so a plain `cargo build` works
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+rustflags = [
+  "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=--nmagic",
+]
+
+runner = "./flash.sh"
