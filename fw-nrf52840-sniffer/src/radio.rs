@@ -49,6 +49,9 @@ const SRC_ADDR: u16 = 0x0001;
 /// Receiver's short address. 0xFFFF = broadcast (everyone)
 #[cfg(feature = "tx")]
 const DST_ADDR: u16 = 0xFFFF;
+/// Sent after the header in every frame
+#[cfg(feature = "tx")]
+const PAYLOAD: &[u8] = &[0xAB, 0xCD];
 
 #[cfg(feature = "tx")]
 #[embassy_executor::task]
@@ -66,8 +69,14 @@ async fn transmitter_task(mut radio: Radio<'static>) {
             dst: DST_ADDR,
             src: SRC_ADDR,
         };
+        let header = header.to_bytes();
+
+        // | header | payload |
         let mut packet = Packet::new();
-        packet.copy_from_slice(&header.to_bytes());
+        packet.set_len((header.len() + PAYLOAD.len()) as u8);
+        let (head, payload) = packet.split_at_mut(header.len());
+        head.copy_from_slice(&header);
+        payload.copy_from_slice(PAYLOAD);
         // Err = channel busy (CCA): skip this one, try again next tick
         if radio.try_send(&mut packet).await.is_ok() {
             let _ = FRAMES.try_send(packet);
