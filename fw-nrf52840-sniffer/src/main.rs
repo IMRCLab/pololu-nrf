@@ -1,6 +1,13 @@
 #![no_std]
 #![no_main]
 
+#[cfg(not(any(feature = "rx", feature = "tx")))]
+compile_error!("choose a role: build with `--features rx` or `--features tx`");
+#[cfg(all(feature = "rx", feature = "tx"))]
+compile_error!("features `rx` and `tx` are mutually exclusive");
+
+mod frame;
+mod radio;
 mod usb;
 
 use embassy_executor::Spawner;
@@ -22,13 +29,18 @@ async fn led_blink_task(mut led: Output<'static>) {
 async fn main(spawner: Spawner) {
     let mut config = embassy_nrf::config::Config::default();
 
-    // USB needs the external 32 MHz crystal
+    // USB and the radio need the external 32 MHz crystal
     config.hfclk_source = HfclkSource::ExternalXtal;
 
     let p = embassy_nrf::init(config);
 
-    let led = Output::new(p.P0_12, Level::High, OutputDrive::Standard);
+    #[cfg(feature = "tx")]
+    let led = Output::new(p.P0_12, Level::High, OutputDrive::Standard); // blue led
+
+    #[cfg(feature = "rx")]
+    let led = Output::new(p.P0_06, Level::High, OutputDrive::Standard); // green led
     spawner.spawn(led_blink_task(led).unwrap());
 
     usb::init(spawner, p.USBD);
+    radio::init(spawner, p.RADIO);
 }

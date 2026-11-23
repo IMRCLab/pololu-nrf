@@ -68,8 +68,13 @@ The ELF ends up in `target/thumbv7em-none-eabihf/release/fw-nrf52840-sniffer`.
 3. Run:
 
    ```bash
-   cargo run --release
+   cargo run --release --features rx
    ```
+   for receiver or
+      ```bash
+   cargo run --release --features tx
+   ```
+   for a sender (for testing)
 
 `cargo run` builds the firmware and calls [`flash.sh`](flash.sh) (configured as the
 runner in `.cargo/config.toml`), which converts the ELF to Intel HEX, packages it
