@@ -16,6 +16,9 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        role: [rx, tx]
     defaults:
       run:
         working-directory: fw-nrf52840-sniffer
@@ -25,22 +28,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: thumbv7em-none-eabihf
-          components: rustfmt, clippy, llvm-tools
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fw-nrf52840-sniffer
 
-      - name: Install cargo-binutils
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-binutils
-
       - name: Check formatting
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --features ${{ matrix.role }} -- -D warnings
 
       - name: Build (release)
-        run: cargo build --release
+        run: cargo build --release --features ${{ matrix.role }}
