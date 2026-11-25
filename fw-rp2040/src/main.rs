@@ -7,6 +7,7 @@ use embassy_time::Timer;
 use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 use panic_halt as _;
 
+mod encoder;
 mod motor;
 use crate::motor::init_motors;
 
@@ -24,6 +25,9 @@ async fn main(spawner: embassy_executor::Spawner) {
     let led = Output::new(p.PIN_25, Level::Low);
 
     spawner.spawn(led_blink_task(led).unwrap());
+
+    let _encoders = encoder::Encoders::new(p.PIO0, p.PIN_12, p.PIN_13, p.PIN_8, p.PIN_9);
+    let (_left_count, _right_count) = _encoders.counts();
 
     let direction_left = Output::new(p.PIN_11, Level::Low);
     let direction_right = Output::new(p.PIN_10, Level::Low);
@@ -49,8 +53,8 @@ async fn main(spawner: embassy_executor::Spawner) {
         direction_right,
     );
 
+    motors.stop();
     loop {
-        
         motors.set_speed(0.3, 0.3);
         Timer::after(embassy_time::Duration::from_millis(1)).await;
     }
