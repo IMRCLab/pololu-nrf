@@ -1,9 +1,6 @@
 use embassy_rp::{
     gpio::Output,
-    pwm::{
-        PwmOutput,
-        SetDutyCycle,
-    },
+    pwm::{PwmOutput, SetDutyCycle},
 };
 
 pub struct Motor<'a> {
@@ -12,14 +9,8 @@ pub struct Motor<'a> {
 }
 
 impl<'a> Motor<'a> {
-    pub fn new(
-        pwm: PwmOutput<'a>,
-        direction: Output<'a>,
-    ) -> Self {
-        Self {
-            pwm,
-            direction,
-        }
+    pub fn new(pwm: PwmOutput<'a>, direction: Output<'a>) -> Self {
+        Self { pwm, direction }
     }
 
     pub fn set_speed(&mut self, speed: f32) {
@@ -28,7 +19,7 @@ impl<'a> Motor<'a> {
         if speed >= 0.0 {
             self.direction.set_high();
         } else {
-            self.direction.set_low();   
+            self.direction.set_low();
         }
 
         let duty = (speed.abs() * self.pwm.max_duty_cycle() as f32) as u16;
@@ -39,7 +30,6 @@ impl<'a> Motor<'a> {
     pub fn stop(&mut self) {
         self.pwm.set_duty_cycle(0).unwrap();
     }
-
 }
 
 pub struct MotorController {

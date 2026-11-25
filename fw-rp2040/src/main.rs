@@ -2,11 +2,12 @@
 #![no_main]
 
 use embassy_rp::gpio::{Level, Output};
-use embassy_time::Timer;
+use embassy_time::{Duration, Ticker, Timer};
 
 use embassy_rp::pwm::{Config as PwmConfig, Pwm};
 use panic_halt as _;
 
+mod control;
 mod encoder;
 mod motor;
 use crate::motor::init_motors;
@@ -26,8 +27,7 @@ async fn main(spawner: embassy_executor::Spawner) {
 
     spawner.spawn(led_blink_task(led).unwrap());
 
-    let _encoders = encoder::Encoders::new(p.PIO0, p.PIN_12, p.PIN_13, p.PIN_8, p.PIN_9);
-    let (_left_count, _right_count) = _encoders.counts();
+    let encoders = encoder::Encoders::new(p.PIO0, p.PIN_12, p.PIN_13, p.PIN_8, p.PIN_9);
 
     let direction_left = Output::new(p.PIN_11, Level::Low);
     let direction_right = Output::new(p.PIN_10, Level::Low);
@@ -35,28 +35,23 @@ async fn main(spawner: embassy_executor::Spawner) {
     let pwm_right = p.PIN_14;
 
     let mut pwm_config = PwmConfig::default();
-    pwm_config.top = 10_000; // TODO try lower
+    pwm_config.top = 10_000;
 
-    let pwm = Pwm::new_output_ab(
-        p.PWM_SLICE7,
-        pwm_right,
-        pwm_left,
-        pwm_config.clone(),
-    );
+    let pwm = Pwm::new_output_ab(p.PWM_SLICE7, pwm_right, pwm_left, pwm_config.clone());
 
     let (pwm_right, pwm_left) = pwm.split();
 
-    let mut motors = init_motors(
+    let motors = init_motors(
         pwm_left.expect("left motor PWM channel missing"),
         pwm_right.expect("right motor PWM channel missing"),
         direction_left,
         direction_right,
     );
 
-    motors.stop();
+    let mut control = control::Control::new(motors, encoders);
+    let mut ticker = Ticker::every(Duration::from_millis(control::DT_MS));
     loop {
-        motors.set_speed(0.3, 0.3);
-        Timer::after(embassy_time::Duration::from_millis(1)).await;
+        ticker.next().await;
+        control.update(0.5, 2.0);
     }
-    
 }
