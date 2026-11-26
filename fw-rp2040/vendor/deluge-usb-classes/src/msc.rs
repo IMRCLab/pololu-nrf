@@ -53,7 +53,27 @@ static MSC_RESET: AtomicBool = AtomicBool::new(false);
 /// been requested since the last call.  The BOT transport loop polls this and,
 /// when set, abandons any in-flight data/status phase and waits for a fresh CBW.
 pub fn take_reset() -> bool {
-    MSC_RESET.swap(false, Ordering::AcqRel)
+    take(&MSC_RESET)
+}
+
+/// Set by [`Handler::reset`] on a USB bus reset (e.g. the cable was replugged).
+static BUS_RESET: AtomicBool = AtomicBool::new(false);
+
+/// Returns `true` (consuming the flag) if a USB bus reset happened since the
+/// last call.  The BOT transport loop uses it to forget a host eject, so the
+/// medium is back after the cable is replugged.
+pub fn take_bus_reset() -> bool {
+    take(&BUS_RESET)
+}
+
+/// Clears `flag` and returns its previous value.
+fn take(flag: &AtomicBool) -> bool {
+    // Load + store instead of `swap`: Cortex-M0+ has no atomic read-modify-write.
+    critical_section::with(|_| {
+        let value = flag.load(Ordering::Acquire);
+        flag.store(false, Ordering::Release);
+        value
+    })
 }
 
 /// USB MSC (Bulk-Only Transport) class handler.
@@ -118,5 +138,6 @@ impl Handler for MscClass {
     fn reset(&mut self) {
         // USB bus reset — drop any pending Bulk-Only Reset request.
         MSC_RESET.store(false, Ordering::Release);
+        BUS_RESET.store(true, Ordering::Release);
     }
 }

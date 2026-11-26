@@ -6,6 +6,8 @@ use embassy_time::Timer;
 
 use panic_halt as _;
 
+mod usb_msc;
+
 #[embassy_executor::task]
 async fn led_blink_task(mut led: Output<'static>) {
     loop {
@@ -20,4 +22,5 @@ async fn main(spawner: embassy_executor::Spawner) {
     let led = Output::new(p.PIN_25, Level::Low);
 
     spawner.spawn(led_blink_task(led).unwrap());
+    usb_msc::init(spawner, p.USB).await;
 }

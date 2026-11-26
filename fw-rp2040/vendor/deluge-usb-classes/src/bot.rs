@@ -16,7 +16,7 @@
 //! and overlaps the storage transfer with the USB transfer (one bank streams
 //! over USB while the other is filled/drained by the device).
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use embassy_futures::join::join;
 use embassy_futures::select::{Either, select};
 use embassy_time::{Duration, Instant, Timer};
@@ -24,14 +24,7 @@ use log::{error, info, warn};
 
 use embassy_usb_driver::{EndpointIn, EndpointOut};
 
-use crate::msc::take_reset;
-
-// ── Throughput counters (read by an OLED/status task) ──────────────────────────
-
-/// Total bytes sent to the host (SCSI READ / device→host).
-pub static TX_BYTES: AtomicU64 = AtomicU64::new(0);
-/// Total bytes received from the host (SCSI WRITE / host→device).
-pub static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+use crate::msc::{take_bus_reset, take_reset};
 
 // ── BOT / SCSI constants ──────────────────────────────────────────────────────
 
@@ -46,12 +39,12 @@ const CSW_STATUS_FAILED: u8 = 0x01;
 /// SCSI logical block size.  Both backends use 512-byte blocks.
 pub const BLOCK_SIZE: u32 = 512;
 
-/// Per-iteration transfer chunk in sectors.  64 × 512 = 32 KiB, which stays
-/// below the 65535-byte endpoint transfer-length limit while amortising setup.
-const CHUNK_SECTORS: u32 = 64;
+/// Per-iteration transfer chunk in sectors.  8 × 512 = 4 KiB (one RP2040 flash
+/// erase sector), keeping the two banks at 8 KiB of RAM.
+const CHUNK_SECTORS: u32 = 8;
 const BUF_BYTES: usize = CHUNK_SECTORS as usize * BLOCK_SIZE as usize;
 
-/// The data phase's double buffer (two 32 KiB banks, one filling while the other drains), which
+/// The data phase's double buffer (two 4 KiB banks, one filling while the other drains), which
 /// the caller owns and lends to [`run`] or [`run_until`] for the session: put it in a `static`
 /// (behind an async `Mutex`, say), not on a task's stack.
 #[repr(C, align(4))]
@@ -145,6 +138,11 @@ pub trait BlockDevice {
     fn is_write_protected(&self) -> bool {
         false
     }
+    /// Write out any cached data.  Called on SYNCHRONIZE CACHE and on a host
+    /// eject.  Defaults to a no-op for write-through backends.
+    async fn flush(&mut self) -> Result<(), ()> {
+        Ok(())
+    }
 }
 
 // ── Transport loop ──────────────────────────────────────────────────────────
@@ -197,7 +195,8 @@ pub async fn run_until<B: BlockDevice, EI: EndpointIn, EO: EndpointOut>(
     let mut cbw = [0u8; 64];
     // Latched by a host eject (START STOP UNIT, LOEJ); makes the medium report
     // as absent so the host stays unmounted instead of auto-remounting.  Resets
-    // with the session (a new `run_until` for a fresh mass-storage mode entry).
+    // with the session (a new `run_until` for a fresh mass-storage mode entry)
+    // and on a USB bus reset (the cable was replugged).
     let mut ejected = false;
 
     loop {
@@ -223,6 +222,12 @@ pub async fn run_until<B: BlockDevice, EI: EndpointIn, EO: EndpointOut>(
             warn!("BOT: bad CBW signature {:08x}", signature);
             continue;
         }
+        // A bus reset (replug) since the last command brings an ejected medium back.
+        if take_bus_reset() {
+            ejected = false;
+            sense = Sense::GOOD;
+        }
+
         let tag = u32::from_le_bytes([cbw[4], cbw[5], cbw[6], cbw[7]]);
         let data_len = u32::from_le_bytes([cbw[8], cbw[9], cbw[10], cbw[11]]);
         let dir_in = cbw[12] & 0x80 != 0;
@@ -242,6 +247,16 @@ pub async fn run_until<B: BlockDevice, EI: EndpointIn, EO: EndpointOut>(
             &mut buf.0,
         )
         .await;
+
+        // The host still expects data when the command sent less than requested.
+        // A short packet ends the data phase; if the last packet sent was full
+        // (or nothing was sent), that takes a zero-length packet.  Otherwise the
+        // host would take the CSW as data.  (Upstream would STALL here, which
+        // embassy-usb doesn't offer to classes.)
+        let max_packet = ep_in.info().max_packet_size as u32;
+        if dir_in && residue > 0 && (data_len - residue) % max_packet == 0 {
+            let _ = ep_in.write(&[]).await;
+        }
 
         // ── Status phase: send the CSW ───────────────────────────────────────
         if send_csw(&mut ep_in, tag, residue, status).await.is_err() {
@@ -329,8 +344,18 @@ async fn handle_command<B: BlockDevice, EI: EndpointIn, EO: EndpointOut>(
             send_data_in(ep_in, &data, data_len).await
         }
 
-        // PREVENT/ALLOW MEDIUM REMOVAL, SYNCHRONIZE CACHE(10) — accepted no-ops.
-        0x1E | 0x35 => {
+        // PREVENT/ALLOW MEDIUM REMOVAL — accepted no-op.
+        0x1E => {
+            *sense = Sense::GOOD;
+            (CSW_STATUS_GOOD, data_len)
+        }
+
+        // SYNCHRONIZE CACHE(10) — write out the device's cache.
+        0x35 => {
+            if dev.flush().await.is_err() {
+                *sense = Sense::MEDIUM_ERROR;
+                return (CSW_STATUS_FAILED, data_len);
+            }
             *sense = Sense::GOOD;
             (CSW_STATUS_GOOD, data_len)
         }
@@ -345,6 +370,10 @@ async fn handle_command<B: BlockDevice, EI: EndpointIn, EO: EndpointOut>(
                 *ejected = (cdb[4] & 0x01) == 0;
                 if *ejected {
                     info!("BOT: medium ejected by host");
+                    if dev.flush().await.is_err() {
+                        *sense = Sense::MEDIUM_ERROR;
+                        return (CSW_STATUS_FAILED, data_len);
+                    }
                 }
             }
             *sense = Sense::GOOD;
@@ -445,13 +474,30 @@ async fn drain_data_out<EO: EndpointOut>(
     }
 }
 
+/// Read packets until `buf` is full, returning the byte count (short only if the
+/// host ended the transfer early with a short packet).
+///
+/// `EndpointOut::read` moves a single packet, and `read_transfer` would wait for
+/// a terminating short packet even when `buf` is already full.
+async fn read_exact<EO: EndpointOut>(ep_out: &mut EO, buf: &mut [u8]) -> Result<usize, ()> {
+    let max_packet = ep_out.info().max_packet_size as usize;
+    let mut n = 0;
+    while n < buf.len() {
+        let got = ep_out.read(&mut buf[n..]).await.map_err(|_| ())?;
+        n += got;
+        if got < max_packet {
+            break;
+        }
+    }
+    Ok(n)
+}
+
 /// Send a short data-in response (≤ `data_len` bytes), returning `(status, residue)`.
 async fn send_data_in<EI: EndpointIn>(ep_in: &mut EI, data: &[u8], data_len: u32) -> (u8, u32) {
     let len = (data.len()).min(data_len as usize);
-    if len > 0 && ep_in.write(&data[..len]).await.is_err() {
+    if len > 0 && ep_in.write_transfer(&data[..len], false).await.is_err() {
         return (CSW_STATUS_FAILED, data_len);
     }
-    TX_BYTES.fetch_add(len as u64, Ordering::Relaxed);
     // Report any Hi > Di shortfall via the CSW residue.  We deliberately do not
     // halt the IN endpoint: the CSW must still go out on it, and all major hosts
     // accept a short data-in phase plus a residue.
@@ -496,13 +542,13 @@ async fn read_blocks<B: BlockDevice, EI: EndpointIn>(
             let nb = (next_chunk * BLOCK_SIZE) as usize;
             let (wr, rd) = if cur_in_b0 {
                 join(
-                    ep_in.write(&b0[..cb]),
+                    ep_in.write_transfer(&b0[..cb], false),
                     dev.read(cur_lba, next_chunk, &mut b1[..nb]),
                 )
                 .await
             } else {
                 join(
-                    ep_in.write(&b1[..cb]),
+                    ep_in.write_transfer(&b1[..cb], false),
                     dev.read(cur_lba, next_chunk, &mut b0[..nb]),
                 )
                 .await
@@ -512,7 +558,6 @@ async fn read_blocks<B: BlockDevice, EI: EndpointIn>(
                 break;
             }
             sent += cb as u32;
-            TX_BYTES.fetch_add(cb as u64, Ordering::Relaxed);
             if rd.is_err() {
                 error!("BOT: read lba={} failed", cur_lba);
                 *sense = Sense::MEDIUM_ERROR;
@@ -526,16 +571,15 @@ async fn read_blocks<B: BlockDevice, EI: EndpointIn>(
         } else {
             // Last chunk: nothing left to prefetch — just send it.
             let wr = if cur_in_b0 {
-                ep_in.write(&b0[..cb]).await
+                ep_in.write_transfer(&b0[..cb], false).await
             } else {
-                ep_in.write(&b1[..cb]).await
+                ep_in.write_transfer(&b1[..cb], false).await
             };
             if wr.is_err() {
                 status = CSW_STATUS_FAILED;
                 break;
             }
             sent += cb as u32;
-            TX_BYTES.fetch_add(cb as u64, Ordering::Relaxed);
             break;
         }
     }
@@ -563,10 +607,9 @@ async fn write_blocks<B: BlockDevice, EO: EndpointOut>(
     // Prime: receive the first chunk from USB into bank 0.
     let mut cur_chunk = remaining.min(CHUNK_SECTORS);
     let cb = (cur_chunk * BLOCK_SIZE) as usize;
-    match ep_out.read(&mut b0[..cb]).await {
+    match read_exact(ep_out, &mut b0[..cb]).await {
         Ok(got) if got == cb => {
             recvd += cb as u32;
-            RX_BYTES.fetch_add(cb as u64, Ordering::Relaxed);
         }
         _ => return (CSW_STATUS_FAILED, data_len),
     }
@@ -583,13 +626,13 @@ async fn write_blocks<B: BlockDevice, EO: EndpointOut>(
             let (wr, rd) = if cur_in_b0 {
                 join(
                     dev.write(write_lba, cur_chunk, &b0[..cb]),
-                    ep_out.read(&mut b1[..nb]),
+                    read_exact(ep_out, &mut b1[..nb]),
                 )
                 .await
             } else {
                 join(
                     dev.write(write_lba, cur_chunk, &b1[..cb]),
-                    ep_out.read(&mut b0[..nb]),
+                    read_exact(ep_out, &mut b0[..nb]),
                 )
                 .await
             };
@@ -603,7 +646,6 @@ async fn write_blocks<B: BlockDevice, EO: EndpointOut>(
             match rd {
                 Ok(got) if got == nb => {
                     recvd += nb as u32;
-                    RX_BYTES.fetch_add(nb as u64, Ordering::Relaxed);
                 }
                 Ok(got) => {
                     warn!("BOT: short WRITE data ({} of {})", got, nb);
