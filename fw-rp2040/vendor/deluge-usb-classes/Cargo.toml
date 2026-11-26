@@ -1,0 +1,20 @@
+# Trimmed and patched copy of deluge-usb-classes 0.1.0 (MSC part only), see PATCHES.md
+[package]
+name = "deluge-usb-classes"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FirestormAudio/deluge-sdk"
+description = "USB Mass Storage (Bulk-Only Transport / SCSI) device class for embassy-usb"
+
+[lib]
+name = "usb_classes"
+test = false
+
+[dependencies]
+critical-section = "1"
+embassy-futures = "0.1.2"
+embassy-time = "0.5.1"
+embassy-usb = { version = "0.6.0", default-features = false }
+embassy-usb-driver = "0.2.2"
+log = "0.4"
