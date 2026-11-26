@@ -1,4 +1,11 @@
 //! USB drive (mass storage) backed by the flash drive
+//!
+//! USB starts at boot, but the drive is only offered to the host once
+//! [`enable_drive`] is called (drive mode). Until then, and for good in robot
+//! mode, the host sees the drive without a medium, so the host and the
+//! firmware never use the filesystem at the same time.
+
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_rp::peripherals::USB;
@@ -8,12 +15,12 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, with_timeout};
-use embassy_usb::{Builder, UsbDevice};
+use embassy_usb::{Builder, Handler, UsbDevice};
 use static_cell::{ConstStaticCell, StaticCell};
 use usb_classes::bot::{self, BlockDevice, BotBuffer, Inquiry};
 use usb_classes::msc::MscClass;
 
-use crate::flash_disk::{DISK_SIZE, FlashDisk};
+use crate::flash_disk::{DISK_SIZE, FlashDisk, SharedDisk};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -34,13 +41,18 @@ const BLOCK_SIZE: u32 = bot::BLOCK_SIZE;
 /// this bounds what is lost when the cable is pulled without ejecting.
 const IDLE_FLUSH: Duration = Duration::from_millis(200);
 
-type SharedDisk = Mutex<CriticalSectionRawMutex, FlashDisk>;
-
 /// Signaled after every write from the host
 static WRITTEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
-/// Sets up the USB device and spawns its tasks.
-pub fn init(spawner: Spawner, usb: Peri<'static, USB>, disk: FlashDisk) {
+/// Signaled when a host has configured the device
+static CONFIGURED: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// The host may use the drive
+static DRIVE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Sets up the USB device and spawns its tasks. Returns the drive, shared
+/// with USB.
+pub fn init(spawner: Spawner, usb: Peri<'static, USB>, disk: FlashDisk) -> &'static SharedDisk {
     static DISK: StaticCell<SharedDisk> = StaticCell::new();
     let disk = DISK.init(Mutex::new(disk));
 
@@ -62,6 +74,7 @@ pub fn init(spawner: Spawner, usb: Peri<'static, USB>, disk: FlashDisk) {
     static BOS_DESC: StaticCell<[u8; 256]> = StaticCell::new();
     static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
     static MSC: StaticCell<MscClass> = StaticCell::new();
+    static HOST_DETECT: StaticCell<HostDetect> = StaticCell::new();
     static BOT_BUF: ConstStaticCell<BotBuffer> = ConstStaticCell::new(BotBuffer::new());
 
     let mut builder = Builder::new(
@@ -75,10 +88,39 @@ pub fn init(spawner: Spawner, usb: Peri<'static, USB>, disk: FlashDisk) {
 
     let (msc, ep_out, ep_in) = MscClass::new(&mut builder, MAX_PACKET);
     builder.handler(MSC.init(msc));
+    builder.handler(HOST_DETECT.init(HostDetect));
 
     spawner.spawn(usb_task(builder.build()).unwrap());
     spawner.spawn(msc_task(UsbDisk(disk), ep_in, ep_out, BOT_BUF.take()).unwrap());
     spawner.spawn(idle_flush_task(disk).unwrap());
+    disk
+}
+
+/// Waits up to `timeout` for a USB host to configure the device. Returns
+/// whether one did.
+pub async fn host_connected(timeout: Duration) -> bool {
+    with_timeout(timeout, CONFIGURED.wait()).await.is_ok()
+}
+
+/// Offers the drive to the host (drive mode). The firmware must not use the
+/// drive anymore.
+pub fn enable_drive() {
+    DRIVE_ENABLED.store(true, Ordering::Release);
+}
+
+fn drive_enabled() -> bool {
+    DRIVE_ENABLED.load(Ordering::Acquire)
+}
+
+/// Reports when the host has configured the device
+struct HostDetect;
+
+impl Handler for HostDetect {
+    fn configured(&mut self, configured: bool) {
+        if configured {
+            CONFIGURED.signal(());
+        }
+    }
 }
 
 /// Runs the USB stack (enumeration, control requests). Must run forever.
@@ -118,14 +160,17 @@ impl BlockDevice for UsbDisk {
     }
 
     fn is_ready(&self) -> bool {
-        true
+        drive_enabled()
     }
 
     async fn ensure_ready(&mut self) -> bool {
-        true
+        drive_enabled()
     }
 
     async fn read(&mut self, lba: u32, count: u32, buf: &mut [u8]) -> Result<(), ()> {
+        if !drive_enabled() {
+            return Err(());
+        }
         let len = (count * BLOCK_SIZE) as usize;
         let buf = buf.get_mut(..len).ok_or(())?;
         let offset = lba.checked_mul(BLOCK_SIZE).ok_or(())?;
@@ -133,6 +178,9 @@ impl BlockDevice for UsbDisk {
     }
 
     async fn write(&mut self, lba: u32, count: u32, buf: &[u8]) -> Result<(), ()> {
+        if !drive_enabled() {
+            return Err(());
+        }
         let len = (count * BLOCK_SIZE) as usize;
         let buf = buf.get(..len).ok_or(())?;
         let offset = lba.checked_mul(BLOCK_SIZE).ok_or(())?;
@@ -142,6 +190,9 @@ impl BlockDevice for UsbDisk {
     }
 
     async fn flush(&mut self) -> Result<(), ()> {
+        if !drive_enabled() {
+            return Ok(());
+        }
         self.0.lock().await.flush().map_err(|_| ())
     }
 

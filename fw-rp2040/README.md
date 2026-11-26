@@ -29,6 +29,13 @@ Flashing MicroPython (or anything else larger than 2 MiB) overwrites the drive.
 Writes are cached per 4 KiB flash sector and reach flash 200 ms after the host stops writing,
 or on eject. Eject the drive before unplugging.
 
+The robot runs in one of two modes, chosen once at boot (changing it takes a reset):
+
+- **Drive mode** (yellow LED on): a USB host configured the robot within 1 s of boot. The host
+  owns the drive; the robot does nothing else.
+- **Robot mode** (yellow LED blinking): no USB host. The firmware owns the drive (configuration,
+  logs). If a cable is plugged in later, the host sees the drive without a medium.
+
 The mass storage class is a trimmed and patched copy of `deluge-usb-classes` in
 `vendor/deluge-usb-classes` (see `PATCHES.md` there).
 
@@ -38,7 +45,8 @@ Test on Linux (replace `sdX`; `lsblk` lists the devices):
 head -c 3000000 /dev/urandom > test.bin && cp test.bin "/run/media/$USER/3PI DRIVE/" && sync
 ```
 
-Eject the drive, reset the robot (or replug without batteries), then:
+Eject the drive, reset the robot with the cable still plugged in (or replug without batteries),
+then:
 
 ```bash
 cmp test.bin "/run/media/$USER/3PI DRIVE/test.bin" && echo same

@@ -6,6 +6,8 @@
 
 use embassy_rp::flash::{self, Blocking, ERASE_SIZE, PAGE_SIZE};
 use embassy_rp::peripherals::FLASH;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
 use embedded_fatfs::{FileSystem, FormatVolumeOptions, FsOptions, format_volume};
 use embedded_io_async::{ErrorKind, ErrorType, Read, Seek, SeekFrom, Write};
 
@@ -30,6 +32,9 @@ const README: &[u8] = b"3pi+ 2040 drive.\r\n\
 Log files from the robot are stored here, and its configuration can be edited here.\r\n";
 
 pub type Flash = flash::Flash<'static, FLASH, Blocking, FLASH_SIZE>;
+
+/// The drive, shared between USB and the firmware
+pub type SharedDisk = Mutex<CriticalSectionRawMutex, FlashDisk>;
 
 pub struct FlashDisk {
     flash: Flash,
