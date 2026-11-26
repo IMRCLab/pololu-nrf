@@ -20,24 +20,35 @@ Pick a runner in `.cargo/config.toml`, then run `cargo run --release`.
 
 # USB drive (work in progress)
 
-When connected over USB, the robot shows up as a small USB drive
-(`0x1209:0x0001`, "3pi+ 2040 drive"). For now it is a 128 KiB RAM disk, formatted at
-boot with a `README.TXT`. Its contents are lost on reset.
+When connected over USB, the robot shows up as a USB drive (`0x1209:0x0001`,
+"3pi+ 2040 drive"). The drive is the 14 MiB of flash after the firmware (from 2 MiB on, see
+`memory.x`), so its files survive resets and firmware updates. On first boot, if the drive has
+no boot sector or partition table yet, the firmware formats it as FAT with a `README.TXT`.
+Flashing MicroPython (or anything else larger than 2 MiB) overwrites the drive.
+
+Writes are cached per 4 KiB flash sector and reach flash 200 ms after the host stops writing,
+or on eject. Eject the drive before unplugging.
 
 The mass storage class is a trimmed and patched copy of `deluge-usb-classes` in
 `vendor/deluge-usb-classes` (see `PATCHES.md` there).
 
-Test on Linux:
+Test on Linux (replace `sdX`; `lsblk` lists the devices):
 
 ```bash
-lsblk                                  # find the device, e.g. /dev/sdX
-sudo mount /dev/sdX /mnt && ls /mnt && cat /mnt/README.TXT
-head -c 60000 /dev/urandom > test.bin && sudo cp test.bin /mnt/ && sync
-sudo umount /mnt && sudo mount /dev/sdX /mnt && cmp test.bin /mnt/test.bin
-sudo umount /mnt && sudo eject /dev/sdX
+head -c 3000000 /dev/urandom > test.bin && cp test.bin "/run/media/$USER/3PI DRIVE/" && sync
 ```
 
-On Windows and macOS, check that the drive mounts, that formatting it works, that ejecting
-it works, and that a file copied to it reads back the same after ejecting and replugging.
-Replug with the robot switched on (batteries in), otherwise unplugging resets it and the
-RAM disk is lost.
+Eject the drive, reset the robot (or replug without batteries), then:
+
+```bash
+cmp test.bin "/run/media/$USER/3PI DRIVE/test.bin" && echo same
+```
+
+To format from the host, unmount without ejecting and close anything that has the drive open:
+
+```bash
+sudo umount /dev/sdX && sudo mkfs.fat -n TEST /dev/sdX
+```
+
+On Windows and macOS, check that the drive mounts, that formatting it works, that ejecting it
+works, and that a copied file is still the same after resetting the robot.

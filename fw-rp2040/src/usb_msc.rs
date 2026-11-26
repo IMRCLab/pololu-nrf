@@ -1,18 +1,19 @@
-//! USB drive (mass storage): proof of concept backed by a RAM disk
-//!
-//! The disk is formatted as FAT at boot and gets a `README.TXT`, so it mounts
-//! right away. Its contents are lost on reset.
+//! USB drive (mass storage) backed by the flash drive
 
 use embassy_executor::Spawner;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{Peri, bind_interrupts};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
+use embassy_time::{Duration, with_timeout};
 use embassy_usb::{Builder, UsbDevice};
-use embedded_fatfs::{FileSystem, FormatVolumeOptions, FsOptions, format_volume};
-use embedded_io_async::{ErrorKind, ErrorType, Read, Seek, SeekFrom, Write};
 use static_cell::{ConstStaticCell, StaticCell};
 use usb_classes::bot::{self, BlockDevice, BotBuffer, Inquiry};
 use usb_classes::msc::MscClass;
+
+use crate::flash_disk::{DISK_SIZE, FlashDisk};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
@@ -26,24 +27,22 @@ type EndpointOut = <UsbDriver as embassy_usb::driver::Driver<'static>>::Endpoint
 const MAX_PACKET: u16 = 64;
 
 /// SCSI block size used by the mass storage class
-const BLOCK_SIZE: usize = bot::BLOCK_SIZE as usize;
+const BLOCK_SIZE: u32 = bot::BLOCK_SIZE;
 
-/// RAM disk size: 256 blocks
-const DISK_SIZE: usize = 128 * 1024;
+/// Without writes for this long, cached data goes to flash. Hosts don't ask
+/// for that themselves (no SYNCHRONIZE CACHE for a write-through device), so
+/// this bounds what is lost when the cable is pulled without ejecting.
+const IDLE_FLUSH: Duration = Duration::from_millis(200);
 
-const README: &[u8] = b"3pi+ 2040 RAM disk (USB drive proof of concept).\r\n\
-Files written here are lost when the robot is reset.\r\n";
+type SharedDisk = Mutex<CriticalSectionRawMutex, FlashDisk>;
 
-/// Formats the RAM disk, sets up the USB device and spawns its tasks.
-pub async fn init(spawner: Spawner, usb: Peri<'static, USB>) {
-    static DISK: ConstStaticCell<[u8; DISK_SIZE]> = ConstStaticCell::new([0; DISK_SIZE]);
-    let mut disk = RamDisk {
-        data: DISK.take(),
-        pos: 0,
-    };
-    // Without a filesystem the drive still shows up, the host just offers to format it
-    let _ = format(&mut disk).await;
-    disk.pos = 0;
+/// Signaled after every write from the host
+static WRITTEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
+
+/// Sets up the USB device and spawns its tasks.
+pub fn init(spawner: Spawner, usb: Peri<'static, USB>, disk: FlashDisk) {
+    static DISK: StaticCell<SharedDisk> = StaticCell::new();
+    let disk = DISK.init(Mutex::new(disk));
 
     let driver = Driver::new(usb, Irqs);
 
@@ -78,21 +77,8 @@ pub async fn init(spawner: Spawner, usb: Peri<'static, USB>) {
     builder.handler(MSC.init(msc));
 
     spawner.spawn(usb_task(builder.build()).unwrap());
-    spawner.spawn(msc_task(disk, ep_in, ep_out, BOT_BUF.take()).unwrap());
-}
-
-/// Formats `disk` as FAT and writes `README.TXT`
-async fn format(disk: &mut RamDisk) -> Result<(), embedded_fatfs::Error<ErrorKind>> {
-    let options = FormatVolumeOptions::new().volume_label(*b"3PI DRIVE  ");
-    format_volume(disk, options).await?;
-    disk.pos = 0;
-
-    let fs = FileSystem::new(&mut *disk, FsOptions::new()).await?;
-    let mut file = fs.root_dir().create_file("README.TXT").await?;
-    file.write_all(README).await?;
-    file.flush().await?;
-    drop(file);
-    fs.unmount().await
+    spawner.spawn(msc_task(UsbDisk(disk), ep_in, ep_out, BOT_BUF.take()).unwrap());
+    spawner.spawn(idle_flush_task(disk).unwrap());
 }
 
 /// Runs the USB stack (enumeration, control requests). Must run forever.
@@ -104,7 +90,7 @@ async fn usb_task(mut device: UsbDevice<'static, UsbDriver>) -> ! {
 /// Answers the host's SCSI commands. Must run forever.
 #[embassy_executor::task]
 async fn msc_task(
-    disk: RamDisk,
+    disk: UsbDisk,
     ep_in: EndpointIn,
     ep_out: EndpointOut,
     buf: &'static mut BotBuffer,
@@ -112,26 +98,23 @@ async fn msc_task(
     bot::run(disk, ep_in, ep_out, buf).await
 }
 
-/// Disk in RAM, seen as 512-byte blocks by USB and as a byte stream by the
-/// FAT library
-struct RamDisk {
-    data: &'static mut [u8; DISK_SIZE],
-    /// Byte position for the FAT library's `Read`/`Write`/`Seek`
-    pos: u64,
-}
-
-impl RamDisk {
-    /// Byte range of `count` blocks starting at `lba`, if it is on the disk
-    fn blocks(lba: u32, count: u32) -> Option<core::ops::Range<usize>> {
-        let start = (lba as usize).checked_mul(BLOCK_SIZE)?;
-        let end = start.checked_add((count as usize).checked_mul(BLOCK_SIZE)?)?;
-        (end <= DISK_SIZE).then_some(start..end)
+/// Writes cached data to flash once the host stops writing.
+#[embassy_executor::task]
+async fn idle_flush_task(disk: &'static SharedDisk) -> ! {
+    loop {
+        WRITTEN.wait().await;
+        while with_timeout(IDLE_FLUSH, WRITTEN.wait()).await.is_ok() {}
+        // A failed flush keeps the data cached: the next write or flush retries
+        let _ = disk.lock().await.flush();
     }
 }
 
-impl BlockDevice for RamDisk {
+/// The flash drive as seen by USB: 512-byte blocks
+struct UsbDisk(&'static SharedDisk);
+
+impl BlockDevice for UsbDisk {
     fn block_count(&self) -> u32 {
-        (DISK_SIZE / BLOCK_SIZE) as u32
+        DISK_SIZE / BLOCK_SIZE
     }
 
     fn is_ready(&self) -> bool {
@@ -143,18 +126,23 @@ impl BlockDevice for RamDisk {
     }
 
     async fn read(&mut self, lba: u32, count: u32, buf: &mut [u8]) -> Result<(), ()> {
-        let range = Self::blocks(lba, count).ok_or(())?;
-        buf.get_mut(..range.len())
-            .ok_or(())?
-            .copy_from_slice(&self.data[range]);
-        Ok(())
+        let len = (count * BLOCK_SIZE) as usize;
+        let buf = buf.get_mut(..len).ok_or(())?;
+        let offset = lba.checked_mul(BLOCK_SIZE).ok_or(())?;
+        self.0.lock().await.read(offset, buf).map_err(|_| ())
     }
 
     async fn write(&mut self, lba: u32, count: u32, buf: &[u8]) -> Result<(), ()> {
-        let range = Self::blocks(lba, count).ok_or(())?;
-        let len = range.len();
-        self.data[range].copy_from_slice(buf.get(..len).ok_or(())?);
-        Ok(())
+        let len = (count * BLOCK_SIZE) as usize;
+        let buf = buf.get(..len).ok_or(())?;
+        let offset = lba.checked_mul(BLOCK_SIZE).ok_or(())?;
+        let result = self.0.lock().await.write(offset, buf);
+        WRITTEN.signal(());
+        result.map_err(|_| ())
+    }
+
+    async fn flush(&mut self) -> Result<(), ()> {
+        self.0.lock().await.flush().map_err(|_| ())
     }
 
     fn inquiry(&self) -> Inquiry {
@@ -163,48 +151,5 @@ impl BlockDevice for RamDisk {
             product: *b"3pi+ 2040 drive ",
             revision: *b"0.1 ",
         }
-    }
-}
-
-impl ErrorType for RamDisk {
-    type Error = ErrorKind;
-}
-
-impl Read for RamDisk {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let start = (self.pos as usize).min(DISK_SIZE);
-        let n = buf.len().min(DISK_SIZE - start);
-        buf[..n].copy_from_slice(&self.data[start..start + n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-}
-
-impl Write for RamDisk {
-    async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        let start = (self.pos as usize).min(DISK_SIZE);
-        let n = buf.len().min(DISK_SIZE - start);
-        if n == 0 && !buf.is_empty() {
-            return Err(ErrorKind::WriteZero);
-        }
-        self.data[start..start + n].copy_from_slice(&buf[..n]);
-        self.pos += n as u64;
-        Ok(n)
-    }
-
-    async fn flush(&mut self) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl Seek for RamDisk {
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
-        let new = match pos {
-            SeekFrom::Start(p) => Some(p),
-            SeekFrom::End(d) => (DISK_SIZE as u64).checked_add_signed(d),
-            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
-        };
-        self.pos = new.ok_or(ErrorKind::InvalidInput)?;
-        Ok(self.pos)
     }
 }

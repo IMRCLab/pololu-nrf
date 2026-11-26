@@ -1,5 +1,6 @@
 MEMORY {
     BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100
+    /* Firmware: first 2 MiB. The rest (14 MiB) is the USB drive, see src/flash_disk.rs */
     FLASH : ORIGIN = 0x10000100, LENGTH = 2048K - 0x100
     RAM   : ORIGIN = 0x20000000, LENGTH = 256K
 }
